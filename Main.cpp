@@ -30,7 +30,7 @@ int main()
 
 	ifstream hKernel32File(_T("C:\\Windows\\System32\\kernel32.dll"), ios::binary);
 	hKernel32File.seekg(0, hKernel32File.end);
-	auto Kernel32FileSize = hKernel32File.tellg();
+	auto Kernel32FileSize = static_cast<SIZE_T>(hKernel32File.tellg());
 	hKernel32File.seekg(0, hKernel32File.beg);
 	auto Kernel32FileContent = VirtualAlloc(NULL, Kernel32FileSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 	if (!Kernel32FileContent) {
@@ -59,7 +59,7 @@ int main()
 
 	ifstream h_32Bit_Kernel32File(_T("C:\\Windows\\System32\\kernel32.dll"), ios::binary);
 	h_32Bit_Kernel32File.seekg(0, h_32Bit_Kernel32File.end);
-	auto _32Bit_Kernel32FileSize = h_32Bit_Kernel32File.tellg();
+	auto _32Bit_Kernel32FileSize = static_cast<SIZE_T>(h_32Bit_Kernel32File.tellg());
 	h_32Bit_Kernel32File.seekg(0, h_32Bit_Kernel32File.beg);
 	auto _32Bit_Kernel32FileContent = VirtualAlloc(NULL, _32Bit_Kernel32FileSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 	if (!_32Bit_Kernel32FileContent) {
