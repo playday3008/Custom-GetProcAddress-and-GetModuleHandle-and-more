@@ -1,57 +1,80 @@
+#include <iostream>
+#include <fstream>
+
 #include <Windows.h>
-#include <stdio.h>
+#include <tchar.h>
+
 #include "CustomWinApi.h"
+
+#ifdef UNICODE
+#define _tcout wcout
+#else
+#define _tcout cout
+#endif
+
+using namespace std;
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 //										Usage examples below
 //////////////////////////////////////////////////////////////////////////////////////////////////
 int main()
 {
-	HMODULE hKernel32 = GetModuleA("kernel32");
-	printf("hKernel32 = 0x%p\n\n",hKernel32);
+	auto hKernel32 = GetModule(_T("kernel32"));
+	_tcout << _T("hKernel32 = 0x") << hex << hKernel32 << endl;
 
-	void* FncDeleteFileA = (void*)GetExportAddress( hKernel32, "DeleteFileA", TRUE );
-	printf("GetExportAddress( hKernel32, \"DeleteFileA\", TRUE ) => 0x%p\n\n",FncDeleteFileA);
+	auto FncDeleteFileA = reinterpret_cast<void*>(GetExportAddress(hKernel32, "DeleteFileA", TRUE));
+	_tcout << _T("GetExportAddress( hKernel32, \"DeleteFileA\", TRUE ) => 0x") << hex << FncDeleteFileA << endl;
 
-	printf("Function offset: (FncDeleteFileA - hKernel32) => 0x%X\n\n",(BYTE*)FncDeleteFileA - (BYTE*)hKernel32 );
+	_tcout << _T("Function offset: (FncDeleteFileA - hKernel32) => 0x") << hex <<
+		reinterpret_cast<unsigned char*>(FncDeleteFileA) - reinterpret_cast<unsigned char*>(hKernel32) << endl;
 
-	HANDLE hKernel32File = CreateFileA("c:\\windows\\system32\\kernel32.dll",GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
-	ULONG Kernel32FileSize = GetFileSize(hKernel32File, NULL);
-	BYTE* Kernel32FileContent = (BYTE*)VirtualAlloc(NULL, Kernel32FileSize, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
-	DWORD Kernel32FileNumberOfBytesRead = 0;
-	ReadFile(hKernel32File, Kernel32FileContent, Kernel32FileSize, &Kernel32FileNumberOfBytesRead, NULL);
-	CloseHandle(hKernel32File);
+	ifstream hKernel32File(_T("C:\\Windows\\System32\\kernel32.dll"), ios::binary);
+	hKernel32File.seekg(0, hKernel32File.end);
+	auto Kernel32FileSize = hKernel32File.tellg();
+	hKernel32File.seekg(0, hKernel32File.beg);
+	auto Kernel32FileContent = VirtualAlloc(NULL, Kernel32FileSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+	if (!Kernel32FileContent) {
+		hKernel32File.close();
+		return 1;
+	}
+	hKernel32File.read(reinterpret_cast<char*>(Kernel32FileContent), Kernel32FileSize);
+	hKernel32File.close();
 
-	printf("Kernel32FileContent => 0x%p\n\n",Kernel32FileContent);
+	_tcout << _T("Kernel32FileContent => 0x") << hex << Kernel32FileContent << endl;
 
-	FncDeleteFileA = (void*)GetExportAddress( (HMODULE)Kernel32FileContent, "DeleteFileA", FALSE );
+	FncDeleteFileA = reinterpret_cast<void*>(GetExportAddress(reinterpret_cast<HMODULE>(Kernel32FileContent), "DeleteFileA", FALSE));
 
-	printf("DeleteFileA inside Kernel32FileContent => 0x%p\n\n",FncDeleteFileA);
+	_tcout << _T("DeleteFileA inside Kernel32FileContent => 0x") << hex << FncDeleteFileA << endl;
 
-	DWORD DeleteFileA_RVA = ImageVaToRva( Kernel32FileContent, FncDeleteFileA );
+	auto DeleteFileA_RVA = ImageVaToRva(Kernel32FileContent, FncDeleteFileA);
 
-	printf("DeleteFileA_RVA => 0x%X {will be same as function offset above ;)}\n\n",DeleteFileA_RVA);
+	_tcout << _T("DeleteFileA_RVA => 0x") << hex << DeleteFileA_RVA << _T(" {will be same as function offset above ;)}") << endl;
 
-	FncDeleteFileA = (void*)( (BYTE*)hKernel32 + DeleteFileA_RVA );
-	printf("hKernel32 + DeleteFileA_RVA => 0x%p\n\n",FncDeleteFileA);
+	FncDeleteFileA = reinterpret_cast<void*>(reinterpret_cast<unsigned char*>(hKernel32) + DeleteFileA_RVA);
+	_tcout << _T("hKernel32 + DeleteFileA_RVA => 0x") << hex << FncDeleteFileA << endl;
 
-	VirtualFree( Kernel32FileContent, NULL, MEM_RELEASE );
+	VirtualFree(Kernel32FileContent, NULL, MEM_RELEASE);
 
 	//can be used to get a function offset of a 32bit dll when currently running as 64bit ;)
 
-	HANDLE h_32Bit_Kernel32File = CreateFileA("c:\\windows\\syswow64\\kernel32.dll",GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
-	ULONG _32Bit_Kernel32FileSize = GetFileSize(h_32Bit_Kernel32File, NULL);
-	BYTE* _32Bit_Kernel32FileContent = (BYTE*)VirtualAlloc(NULL, _32Bit_Kernel32FileSize, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
-	Kernel32FileNumberOfBytesRead = 0;
-	ReadFile(h_32Bit_Kernel32File, _32Bit_Kernel32FileContent, _32Bit_Kernel32FileSize, &Kernel32FileNumberOfBytesRead, NULL);
-	CloseHandle(h_32Bit_Kernel32File);
+	ifstream h_32Bit_Kernel32File(_T("C:\\Windows\\System32\\kernel32.dll"), ios::binary);
+	h_32Bit_Kernel32File.seekg(0, h_32Bit_Kernel32File.end);
+	auto _32Bit_Kernel32FileSize = h_32Bit_Kernel32File.tellg();
+	h_32Bit_Kernel32File.seekg(0, h_32Bit_Kernel32File.beg);
+	auto _32Bit_Kernel32FileContent = VirtualAlloc(NULL, _32Bit_Kernel32FileSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+	if (!_32Bit_Kernel32FileContent) {
+		h_32Bit_Kernel32File.close();
+		return 1;
+	}
+	h_32Bit_Kernel32File.read(reinterpret_cast<char*>(_32Bit_Kernel32FileContent), _32Bit_Kernel32FileSize);
+	h_32Bit_Kernel32File.close();
 
-	void* _32Bit_FncDeleteFileA = (void*)GetExportAddress( (HMODULE)_32Bit_Kernel32FileContent, "DeleteFileA", FALSE );
+	auto _32Bit_FncDeleteFileA = reinterpret_cast<void*>(GetExportAddress(reinterpret_cast<HMODULE>(_32Bit_Kernel32FileContent), "DeleteFileA", FALSE));
 
-	DWORD _32Bit_DeleteFileA_RVA = ImageVaToRva( _32Bit_Kernel32FileContent, _32Bit_FncDeleteFileA );
-	printf("32Bit] DeleteFileA_RVA => 0x%X\n\n",_32Bit_DeleteFileA_RVA);
+	auto _32Bit_DeleteFileA_RVA = ImageVaToRva(_32Bit_Kernel32FileContent, _32Bit_FncDeleteFileA);
+	_tcout << _T("[32Bit] DeleteFileA_RVA => 0x") << hex << _32Bit_DeleteFileA_RVA << endl;
 
-	VirtualFree( _32Bit_Kernel32FileContent, NULL, MEM_RELEASE );
+	VirtualFree(_32Bit_Kernel32FileContent, NULL, MEM_RELEASE);
 
-	system("pause");
-};
+	_tsystem(_T("pause"));
+}
