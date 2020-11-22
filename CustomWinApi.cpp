@@ -1,3 +1,9 @@
+#include <algorithm>
+#include <array>
+#include <cwctype>
+#include <filesystem>
+#include <string>
+
 #include <Windows.h>
 #include <malloc.h>
 #include "CustomWinApi.h"
@@ -93,39 +99,44 @@ HMODULE WINAPI GetModuleW( _In_opt_ LPCWSTR lpModuleName )
 		//...
 	};
 
-	PEB* ProcessEnvironmentBlock = ((PEB*)((TEB*)((TEB*)NtCurrentTeb())->ProcessEnvironmentBlock));
-	if (lpModuleName == nullptr) 
-		return (HMODULE)( ProcessEnvironmentBlock->ImageBaseAddress );
+	auto ProcessEnvironmentBlock = reinterpret_cast<PEB*>(reinterpret_cast<TEB*>(NtCurrentTeb())->ProcessEnvironmentBlock);
+	if (lpModuleName == nullptr)
+		return reinterpret_cast<HMODULE>(ProcessEnvironmentBlock->ImageBaseAddress);
 
-	PEB_LDR_DATA* Ldr = ProcessEnvironmentBlock->Ldr;
+	auto Ldr = ProcessEnvironmentBlock->Ldr;
 
-	LIST_ENTRY* ModuleLists[3] = {0,0,0};
-	ModuleLists[0] = &Ldr->InLoadOrderModuleList;
-	ModuleLists[1] = &Ldr->InMemoryOrderModuleList;
-	ModuleLists[2] = &Ldr->InInitializationOrderModuleList;
-	for (int j = 0; j < 3; j++)
+	std::wstring moduleName = lpModuleName;
+	std::transform(moduleName.begin(), moduleName.end(), moduleName.begin(), ::towlower);
+	std::array<LIST_ENTRY*, 3> ModuleLists{};
+	ModuleLists.at(0) = &Ldr->InLoadOrderModuleList;
+	ModuleLists.at(1) = &Ldr->InMemoryOrderModuleList;
+	ModuleLists.at(2) = &Ldr->InInitializationOrderModuleList;
+	for (size_t j = 0; j < ModuleLists.size(); j++)
 	{
-		for (LIST_ENTRY*  pListEntry  = ModuleLists[j]->Flink;
-						  pListEntry != ModuleLists[j];
+		for (auto  pListEntry  = ModuleLists.at(j)->Flink;
+						  pListEntry != ModuleLists.at(j);
 						  pListEntry  = pListEntry->Flink)
 		{
-			LDR_DATA_TABLE_ENTRY* pEntry = (LDR_DATA_TABLE_ENTRY*)( (BYTE*)pListEntry - sizeof(LIST_ENTRY) * j ); //= CONTAINING_RECORD( pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks );
+			auto pEntry = reinterpret_cast<LDR_DATA_TABLE_ENTRY*>(reinterpret_cast<BYTE*>(pListEntry) - sizeof(LIST_ENTRY) * j); //= CONTAINING_RECORD( pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks );
 
-			if (_wcsicmp( pEntry->BaseDllName.Buffer, lpModuleName ) == 0)
-				return (HMODULE)pEntry->DllBase;
+			std::wstring buffer = pEntry->BaseDllName.Buffer;
+			std::transform(buffer.begin(), buffer.end(), buffer.begin(), ::towlower);
 
-			wchar_t* FileName = GetFileNameFromPath(pEntry->FullDllName.Buffer);
-			if (!FileName)
+			if (buffer == moduleName)
+				return reinterpret_cast<HMODULE>(pEntry->DllBase);
+
+			std::wstring FileName = std::filesystem::path(buffer).filename();
+
+			if (FileName.empty())
 				continue;
 
-			if (_wcsicmp( FileName, lpModuleName ) == 0)
-				return (HMODULE)pEntry->DllBase;
+			if (FileName == moduleName)
+				return reinterpret_cast<HMODULE>(pEntry->DllBase);
 
-			wchar_t FileNameWithoutExtension[256];
-			RemoveFileExtension( FileName, FileNameWithoutExtension, 256 );
+			std::wstring FileNameWithoutExtension = std::filesystem::path(buffer).stem();
 
-			if (_wcsicmp( FileNameWithoutExtension, lpModuleName ) == 0)
-				return (HMODULE)pEntry->DllBase;
+			if (FileNameWithoutExtension == moduleName)
+				return reinterpret_cast<HMODULE>(pEntry->DllBase);
 		}
 	}
 	return nullptr;
@@ -138,19 +149,13 @@ HMODULE WINAPI GetModuleW( _In_opt_ LPCWSTR lpModuleName )
 /// <returns>returns address of the module in memory</returns>
 HMODULE WINAPI GetModuleA( _In_opt_ LPCSTR lpModuleName )
 {
-	if (!lpModuleName) return GetModuleW( NULL );
+	if (!lpModuleName) 
+		return GetModuleW( NULL );
 
-	DWORD ModuleNameLength = (DWORD)strlen( lpModuleName ) + 1;
+	std::string ModuleName = lpModuleName;
+	std::wstring W_ModuleName(ModuleName.begin(), ModuleName.end());
 
-	//allocate buffer for the string on the stack:
-	DWORD NewBufferSize = sizeof(wchar_t) * ModuleNameLength;
-	wchar_t* W_ModuleName = (wchar_t*)alloca( NewBufferSize );
-	for (DWORD i = 0; i < ModuleNameLength; i++)
-		W_ModuleName[i] = lpModuleName[i];
-
-	HMODULE hReturnModule =  GetModuleW( W_ModuleName );
-
-	RtlSecureZeroMemory( W_ModuleName, NewBufferSize );
+	auto hReturnModule =  GetModuleW( W_ModuleName.c_str() );
 
 	return hReturnModule;
 }
@@ -170,34 +175,32 @@ FARPROC WINAPI GetExportAddress( _In_ HMODULE hModule, _In_ LPCSTR lpProcName, _
 	if (lpProcName == NULL)
 		return nullptr;
 
-	unsigned short ProcOrdinal = 0xFFFF;
-	if ( (ULONG_PTR)lpProcName < 0xFFFF )
-		ProcOrdinal = (ULONG_PTR)lpProcName & 0xFFFF;
+	unsigned short ProcOrdinal = USHRT_MAX;
+	if (reinterpret_cast<ULONG_PTR>(lpProcName) < USHRT_MAX)
+		ProcOrdinal = reinterpret_cast<ULONG_PTR>(lpProcName) & USHRT_MAX;
 	else
-	{
 		//in case of "#123" resolve the ordinal to 123
-		if ( lpProcName[0] == '#' )
+		if (lpProcName[0] == '#')
 		{
-			DWORD OrdinalFromString = atoi( lpProcName + 1 );
-			if ( OrdinalFromString < 0xFFFF &&
-				 OrdinalFromString != 0 )
+			DWORD OrdinalFromString = atoi(lpProcName + 1);
+			if (OrdinalFromString < USHRT_MAX &&
+				OrdinalFromString != 0)
 			{
-				ProcOrdinal = OrdinalFromString & 0xFFFF;
-				lpProcName = (LPCSTR)( ProcOrdinal );
+				ProcOrdinal = OrdinalFromString & USHRT_MAX;
+				lpProcName = reinterpret_cast<LPCSTR>(ProcOrdinal);
 			}
 		}
-	}
-	IMAGE_DOS_HEADER* DosHeader = (IMAGE_DOS_HEADER*)hModule;
+	auto DosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(hModule);
 	if ( !DosHeader || DosHeader->e_magic != IMAGE_DOS_SIGNATURE)
 		return nullptr;
 
 	//only OptionalHeader is different between 64bit and 32bit so try not to touch it!
-	IMAGE_NT_HEADERS* NtHeader = (IMAGE_NT_HEADERS*)( (DWORD_PTR)DosHeader + DosHeader->e_lfanew );
+	auto NtHeader = reinterpret_cast<IMAGE_NT_HEADERS*>(reinterpret_cast<DWORD_PTR>(DosHeader) + DosHeader->e_lfanew );
 	if ( NtHeader->Signature != IMAGE_NT_SIGNATURE )
 		return nullptr;
 
 	ULONG ExportDirectorySize = NULL;
-	IMAGE_EXPORT_DIRECTORY* ExportDirectory = (IMAGE_EXPORT_DIRECTORY*)ImageDirectoryEntryToDataEx( DosHeader, MappedAsImage, IMAGE_DIRECTORY_ENTRY_EXPORT, &ExportDirectorySize );
+	auto ExportDirectory = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(ImageDirectoryEntryToDataEx( DosHeader, MappedAsImage, IMAGE_DIRECTORY_ENTRY_EXPORT, &ExportDirectorySize ));
 	if ( !ExportDirectory || !ExportDirectorySize )
 		return nullptr;
 
@@ -208,99 +211,99 @@ FARPROC WINAPI GetExportAddress( _In_ HMODULE hModule, _In_ LPCSTR lpProcName, _
 	//from BlackBone
 	//https://github.com/DarthTon/Blackbone/blob/3dc33d815011b83855af607013d34c836b9d0877/src/BlackBone/Process/ProcessModules.cpp#L266
 	// Fix invalid directory size
-	if (ExportDirectorySize <= sizeof( IMAGE_EXPORT_DIRECTORY ))
-	{
+	if (ExportDirectorySize <= sizeof(IMAGE_EXPORT_DIRECTORY))
 		// New size should take care of max number of present names (max name length is assumed to be 255 chars)
-		ExportDirectorySize = static_cast<DWORD>( ExportDirectory->AddressOfNameOrdinals - (DWORD)( (BYTE*)(ExportDirectory) - (BYTE*)(DosHeader) )
-												  + max( ExportDirectory->NumberOfFunctions, ExportDirectory->NumberOfNames ) * 255 );
-	}
+		ExportDirectorySize = static_cast<DWORD>(ExportDirectory->AddressOfNameOrdinals -
+			static_cast<DWORD>(reinterpret_cast<BYTE*>(ExportDirectory) - reinterpret_cast<BYTE*>(DosHeader))
+			+ max(ExportDirectory->NumberOfFunctions, ExportDirectory->NumberOfNames) * 255);
 
 	DWORD AddressOfNamesRVA			= ExportDirectory->AddressOfNames;
 	DWORD AddressOfFunctionsRVA		= ExportDirectory->AddressOfFunctions;
 	DWORD AddressOfNameOrdinalsRVA	= ExportDirectory->AddressOfNameOrdinals;
 
-	DWORD* ExportNames	= (DWORD*)( MappedAsImage ? ((BYTE*)DosHeader + AddressOfNamesRVA			) : ImageRvaToVa( NtHeader, DosHeader, AddressOfNamesRVA		) );
-	DWORD* Functions	= (DWORD*)( MappedAsImage ? ((BYTE*)DosHeader + AddressOfFunctionsRVA		) : ImageRvaToVa( NtHeader, DosHeader, AddressOfFunctionsRVA	) );
-	WORD*  Ordinals		= (WORD *)( MappedAsImage ? ((BYTE*)DosHeader + AddressOfNameOrdinalsRVA	) : ImageRvaToVa( NtHeader, DosHeader, AddressOfNameOrdinalsRVA	) );
+	auto ExportNames = reinterpret_cast<DWORD*>( MappedAsImage ? (reinterpret_cast<BYTE*>(DosHeader) + AddressOfNamesRVA) : ImageRvaToVa( NtHeader, DosHeader, AddressOfNamesRVA));
+	auto Functions = reinterpret_cast<DWORD*>( MappedAsImage ? (reinterpret_cast<BYTE*>(DosHeader) + AddressOfFunctionsRVA) : ImageRvaToVa( NtHeader, DosHeader, AddressOfFunctionsRVA));
+	auto Ordinals = reinterpret_cast<WORD*>( MappedAsImage ? (reinterpret_cast<BYTE*>(DosHeader) + AddressOfNameOrdinalsRVA) : ImageRvaToVa( NtHeader, DosHeader, AddressOfNameOrdinalsRVA));
 	
 	for (DWORD i = 0; i < ExportDirectory->NumberOfFunctions; i++)
 	{
 		unsigned short OrdinalIndex = Ordinals[i];
 
 		DWORD ExportFncOffset = Functions[OrdinalIndex];
-		if ( !ExportFncOffset )
+		if (!ExportFncOffset)
 			continue;
 
-		char* ProcNamePtr = (char*)( MappedAsImage ? ((char*)DosHeader + ExportNames[i])  : ImageRvaToVa( NtHeader, DosHeader, ExportNames[i]  ) );
-		BYTE* ExportFnc	  = (BYTE*)( MappedAsImage ? ((BYTE*)DosHeader + ExportFncOffset) : ImageRvaToVa( NtHeader, DosHeader, ExportFncOffset ) );
+		auto ProcNamePtr = reinterpret_cast<char*>(MappedAsImage ? (reinterpret_cast<char*>(DosHeader) + ExportNames[i]) : ImageRvaToVa(NtHeader, DosHeader, ExportNames[i]));
+		auto ExportFnc = reinterpret_cast<BYTE*>(MappedAsImage ? (reinterpret_cast<BYTE*>(DosHeader) + ExportFncOffset) : ImageRvaToVa(NtHeader, DosHeader, ExportFncOffset));
 
 		//Forwarded exports:
-		if ( MappedAsImage &&	//Not supported on images that are not mapped
+		if (MappedAsImage &&	//Not supported on images that are not mapped
 								//Not supported with ordinals for forwarded export by name
 			//Check for forwarded export:
-			ExportFnc > ((BYTE*)ExportDirectory) && 
-			ExportFnc < ((BYTE*)ExportDirectory + ExportDirectorySize))
+			ExportFnc > (reinterpret_cast<BYTE*>(ExportDirectory)) &&
+			ExportFnc < (reinterpret_cast<BYTE*>(ExportDirectory) + ExportDirectorySize))
 		{
 			//for example inside the Kernelbase.dll's export table
 			//NTDLL.RtlDecodePointer
 			//It could also forward an ordinal
 			//NTDLL.#123
-			char* ForwardedString = (char*)ExportFnc;
-			DWORD ForwardedStringLen = (DWORD)strlen( ForwardedString )+1;
-			if ( ForwardedStringLen >= 256 )
+			auto ForwardedString = reinterpret_cast<char*>(ExportFnc);
+			auto ForwardedStringLen = static_cast<DWORD>(strlen(ForwardedString)) + 1;
+			if (ForwardedStringLen >= 256)
 				continue;
-			 char szForwardedLibraryName[256];
-			memcpy( szForwardedLibraryName, ForwardedString, ForwardedStringLen );
+			std::array<char, 256> szForwardedLibraryName{};
+			memcpy_s(szForwardedLibraryName.data(), szForwardedLibraryName.size(), ForwardedString, ForwardedStringLen);
 			char* ForwardedFunctionName = NULL;
 			char* ForwardedFunctionOrdinal = NULL;
 			for (DWORD s = 0; s < ForwardedStringLen; s++)
-			{
-				if (szForwardedLibraryName[s] == '.')
+				if (szForwardedLibraryName.at(s) == '.')
 				{
-					szForwardedLibraryName[s] = NULL;
-					ForwardedFunctionName = &ForwardedString[s+1];
+					szForwardedLibraryName.at(s) = NULL;
+					ForwardedFunctionName = &ForwardedString[s + 1];
 					break;
 				}
-			}
 
 			//forwarded by ordinal
-			if ( ForwardedFunctionName != nullptr && ForwardedFunctionName[0] == '#' )
+			if (ForwardedFunctionName != nullptr && ForwardedFunctionName[0] == '#')
 			{
 				ForwardedFunctionOrdinal = ForwardedFunctionName + 1;
 				ForwardedFunctionName = NULL;
 			}
-			if ( ForwardedFunctionName )
+			if (ForwardedFunctionName)
 			{
-				if ( strcmp( lpProcName, ForwardedFunctionName) != NULL )
+				if (std::string(lpProcName) != std::string(ForwardedFunctionName))
 					continue;
 
-				HMODULE hForwardedDll = LoadLibraryA( szForwardedLibraryName );
-				FARPROC ForwardedFunction = (FARPROC)GetExportAddress( hForwardedDll, ForwardedFunctionName, MappedAsImage );
-				return (FARPROC)ForwardedFunction;
+				auto hForwardedDll = LoadLibraryA(szForwardedLibraryName.data());
+				if (!hForwardedDll)
+					return nullptr;
+				auto ForwardedFunction = reinterpret_cast<FARPROC>(GetExportAddress(hForwardedDll, ForwardedFunctionName, MappedAsImage));
+				return reinterpret_cast<FARPROC>(ForwardedFunction);
 			}
 			else
-			if ( ForwardedFunctionOrdinal && ProcOrdinal < 0xFFFF )
-			{
-				DWORD ForwardedOrdinal = atoi( ForwardedFunctionOrdinal );
-				if ( ForwardedOrdinal > 0xFFFF || 
-					 ForwardedOrdinal == 0 ||
-					 ForwardedOrdinal != ProcOrdinal ) 
+				if (ForwardedFunctionOrdinal && ProcOrdinal < 0xFFFF)
+				{
+					DWORD ForwardedOrdinal = atoi(ForwardedFunctionOrdinal);
+					if (ForwardedOrdinal > 0xFFFF ||
+						ForwardedOrdinal == 0 ||
+						ForwardedOrdinal != ProcOrdinal)
+						continue;
+
+					auto hForwardedDll = LoadLibraryA(szForwardedLibraryName.data());
+					#pragma warning(suppress:4312)
+					auto ForwardedFunction = reinterpret_cast<FARPROC>(GetExportAddress(hForwardedDll, reinterpret_cast<LPCSTR>(ForwardedOrdinal & 0xFFFF), MappedAsImage));
+					return reinterpret_cast<FARPROC>(ForwardedFunction);
+				}
+				else
 					continue;
-				
-				HMODULE hForwardedDll = LoadLibraryA( szForwardedLibraryName );
-				FARPROC ForwardedFunction = (FARPROC)GetExportAddress( hForwardedDll, (char*)(ForwardedOrdinal&0xFFFF), MappedAsImage );
-				return (FARPROC)ForwardedFunction;
-			}
-			else
-				continue;
 		}
-		
-		if ( (ULONG_PTR)lpProcName > 0xFFFF && strcmp( lpProcName, ProcNamePtr) == NULL )
-			return (FARPROC)ExportFnc;
+
+		if (reinterpret_cast<ULONG_PTR>(lpProcName) > 0xFFFF && std::string(lpProcName) == std::string(ProcNamePtr))
+			return reinterpret_cast<FARPROC>(ExportFnc);
 		else
 		{
-			if ( (OrdinalIndex+1) == ProcOrdinal )
-				return (FARPROC)ExportFnc;
+			if ((OrdinalIndex + 1) == ProcOrdinal)
+				return reinterpret_cast<FARPROC>(ExportFnc);
 		}
 	}
 	return nullptr;
@@ -310,37 +313,37 @@ FARPROC WINAPI GetExportAddress( _In_ HMODULE hModule, _In_ LPCSTR lpProcName, _
 //////////////////////////////////////////////////////////////////////////////////////////////////
 //			Equivalent to the windows api function ImageDirectoryEntryToDataEx
 //////////////////////////////////////////////////////////////////////////////////////////////////
-PVOID WINAPI ImageDirectoryEntryToDataInternal( PVOID Base, BOOLEAN MappedAsImage, ULONG* Size, DWORD SizeOfHeaders, IMAGE_DATA_DIRECTORY* DataDirectory, IMAGE_FILE_HEADER *ImageFileHeader, void* ImageOptionalHeader )
+PVOID WINAPI ImageDirectoryEntryToDataInternal(PVOID Base, BOOLEAN MappedAsImage, ULONG* Size, DWORD SizeOfHeaders, IMAGE_DATA_DIRECTORY* DataDirectory, IMAGE_FILE_HEADER* ImageFileHeader, void* ImageOptionalHeader)
 {
-	*(ULONG*)Size = NULL;
+	*reinterpret_cast<ULONG*>(Size) = NULL;
 
-	if ( !DataDirectory->VirtualAddress || !DataDirectory->Size || !SizeOfHeaders )
+	if (!DataDirectory->VirtualAddress || !DataDirectory->Size || !SizeOfHeaders)
 		return nullptr;
 
-	*(ULONG*)Size = DataDirectory->Size;
-	if ( MappedAsImage || DataDirectory->VirtualAddress < SizeOfHeaders )
-		return (char *)Base + DataDirectory->VirtualAddress;
+	*reinterpret_cast<ULONG*>(Size) = DataDirectory->Size;
+	if (MappedAsImage || DataDirectory->VirtualAddress < SizeOfHeaders)
+		return reinterpret_cast<char*>(Base) + DataDirectory->VirtualAddress;
 
-	WORD SizeOfOptionalHeader = ImageFileHeader->SizeOfOptionalHeader;
-	WORD NumberOfSections = ImageFileHeader->NumberOfSections;
-	if ( !NumberOfSections || !SizeOfOptionalHeader )
+	auto SizeOfOptionalHeader = ImageFileHeader->SizeOfOptionalHeader;
+	auto NumberOfSections = ImageFileHeader->NumberOfSections;
+	if (!NumberOfSections || !SizeOfOptionalHeader)
 		return nullptr;
 
-	IMAGE_SECTION_HEADER* pSectionHeaders = (IMAGE_SECTION_HEADER*)( (BYTE*)ImageOptionalHeader + SizeOfOptionalHeader );
-	for (DWORD i = 0; i < NumberOfSections; i++)
+	auto pSectionHeaders = reinterpret_cast<IMAGE_SECTION_HEADER*>(reinterpret_cast<BYTE*>(ImageOptionalHeader) + SizeOfOptionalHeader);
+	for (WORD i = 0; i < NumberOfSections; i++)
 	{
-		IMAGE_SECTION_HEADER* pSectionHeader = &pSectionHeaders[i];
-		if ( (DataDirectory->VirtualAddress >= pSectionHeader->VirtualAddress) && 
-			 (DataDirectory->VirtualAddress < (pSectionHeader->SizeOfRawData + pSectionHeader->VirtualAddress)) )
+		auto pSectionHeader = &pSectionHeaders[i];
+		if ((DataDirectory->VirtualAddress >= pSectionHeader->VirtualAddress) &&
+			(DataDirectory->VirtualAddress < (pSectionHeader->SizeOfRawData + pSectionHeader->VirtualAddress)))
 		{
-			return (char *)Base + (DataDirectory->VirtualAddress - pSectionHeader->VirtualAddress) + pSectionHeader->PointerToRawData;
+			return reinterpret_cast<char*>(Base) + (DataDirectory->VirtualAddress - pSectionHeader->VirtualAddress) + pSectionHeader->PointerToRawData;
 		}
 	}
 	return nullptr;
 }
 PVOID WINAPI ImageDirectoryEntryToData32(PVOID Base, BOOLEAN MappedAsImage, USHORT DirectoryEntry, ULONG* Size, IMAGE_FILE_HEADER *ImageFileHeader, IMAGE_OPTIONAL_HEADER32 *ImageOptionalHeader)
 {
-	*(ULONG*)Size = NULL;
+	*reinterpret_cast<ULONG*>(Size) = NULL;
 
 	if ( DirectoryEntry >= ImageOptionalHeader->NumberOfRvaAndSizes )
 		return nullptr;
@@ -359,7 +362,7 @@ PVOID WINAPI ImageDirectoryEntryToData32(PVOID Base, BOOLEAN MappedAsImage, USHO
 }
 PVOID WINAPI ImageDirectoryEntryToData64(PVOID Base, BOOLEAN MappedAsImage, USHORT DirectoryEntry, ULONG* Size, IMAGE_FILE_HEADER *ImageFileHeader, IMAGE_OPTIONAL_HEADER64 *ImageOptionalHeader)
 {
-	*(ULONG*)Size = NULL;
+	*reinterpret_cast<ULONG*>(Size) = NULL;
 
 	if ( DirectoryEntry >= ImageOptionalHeader->NumberOfRvaAndSizes )
 		return nullptr;
@@ -376,32 +379,35 @@ PVOID WINAPI ImageDirectoryEntryToData64(PVOID Base, BOOLEAN MappedAsImage, USHO
 												ImageFileHeader, 
 												ImageOptionalHeader );
 }
-PVOID WINAPI ImageDirectoryEntryToDataRom(PVOID Base, WORD HeaderMagic, USHORT DirectoryEntry, ULONG* Size, IMAGE_FILE_HEADER *ImageFileHeader, IMAGE_ROM_OPTIONAL_HEADER *ImageRomHeaders)
+PVOID WINAPI ImageDirectoryEntryToDataRom(PVOID Base, WORD HeaderMagic, USHORT DirectoryEntry, ULONG* Size, IMAGE_FILE_HEADER* ImageFileHeader, IMAGE_ROM_OPTIONAL_HEADER* ImageRomHeaders)
 {
-	*(ULONG*)Size = NULL;
+	*reinterpret_cast<ULONG*>(Size) = NULL;
 
-	if ( ImageFileHeader->NumberOfSections <= 0u || !ImageFileHeader->SizeOfOptionalHeader )
+	if (ImageFileHeader->NumberOfSections <= 0u || !ImageFileHeader->SizeOfOptionalHeader)
 		return nullptr;
 
-	IMAGE_SECTION_HEADER* pSectionHeader = (IMAGE_SECTION_HEADER*)( (BYTE*)ImageRomHeaders + ImageFileHeader->SizeOfOptionalHeader );
+	auto pSectionHeader = reinterpret_cast<IMAGE_SECTION_HEADER*>(reinterpret_cast<BYTE*>(ImageRomHeaders) + ImageFileHeader->SizeOfOptionalHeader);
+
+	std::string sectionName = reinterpret_cast<char*>(pSectionHeader->Name);
+	std::transform(sectionName.begin(), sectionName.end(), sectionName.begin(), ::tolower);
 
 	WORD j = 0;
-	for ( ; j < ImageFileHeader->NumberOfSections; j++, pSectionHeader++)
+	for (; j < ImageFileHeader->NumberOfSections; j++, pSectionHeader++)
 	{
-		if ( DirectoryEntry == 3 && _stricmp((char *)pSectionHeader->Name, ".pdata") == NULL )
+		if (DirectoryEntry == 3 && sectionName == std::string(".pdata"))
 			break;
-		if ( DirectoryEntry == 6 && _stricmp((char *)pSectionHeader->Name, ".rdata") == NULL )
+		if (DirectoryEntry == 6 && sectionName == std::string(".rdata"))
 		{
-			*(ULONG*)Size = NULL;
-			for ( BYTE* i = (BYTE *)Base + pSectionHeader->PointerToRawData + 0xC; *(DWORD *)i; i += 0x1C )
+			*reinterpret_cast<ULONG*>(Size) = NULL;
+			for (BYTE* i = reinterpret_cast<BYTE*>(Base) + pSectionHeader->PointerToRawData + 0xC; *reinterpret_cast<DWORD*>(i); i += 0x1C)
 				*Size += 0x1C;
 			break;
 		}
 	}
-	if ( j >= ImageFileHeader->NumberOfSections )
-		return nullptr;	
+	if (j >= ImageFileHeader->NumberOfSections)
+		return nullptr;
 
-	return (char *)Base + pSectionHeader->PointerToRawData;
+	return reinterpret_cast<char*>(Base) + pSectionHeader->PointerToRawData;
 }
 
 /// <summary>
@@ -414,32 +420,33 @@ PVOID WINAPI ImageDirectoryEntryToDataRom(PVOID Base, WORD HeaderMagic, USHORT D
 /// <returns>If the function succeeds, the return value is a pointer to the data for the directory entry</returns>
 PVOID WINAPI ImageDirectoryEntryToDataEx(PVOID Base, BOOLEAN MappedAsImage, USHORT DirectoryEntry, ULONG* Size)
 {
-	*(ULONG*)Size = NULL;
+	*reinterpret_cast<ULONG*>(Size) = NULL;
 
-	IMAGE_DOS_HEADER* pDosHeader = (IMAGE_DOS_HEADER*)Base;
+	auto pDosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(Base);
 	if (!pDosHeader)
 		return nullptr;
 
 	IMAGE_FILE_HEADER* ImageFileHeader = nullptr;
 	IMAGE_OPTIONAL_HEADER* ImageOptionalHeader = nullptr;
 
-	LONG NtHeaderFileOffset = pDosHeader->e_lfanew;
-	IMAGE_NT_HEADERS* ImageNtHeader = (PIMAGE_NT_HEADERS)( (LPBYTE)pDosHeader + NtHeaderFileOffset );
+	auto NtHeaderFileOffset = pDosHeader->e_lfanew;
+	IMAGE_NT_HEADERS* ImageNtHeader = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<LPBYTE>(pDosHeader) + NtHeaderFileOffset);
 
-	if (	pDosHeader->e_magic == IMAGE_DOS_SIGNATURE 
-		&&	NtHeaderFileOffset > 0 
-		&&	NtHeaderFileOffset < 0x10000000u 
-		&&	ImageNtHeader->Signature == IMAGE_NT_SIGNATURE )
+	if (pDosHeader->e_magic == IMAGE_DOS_SIGNATURE
+		&& NtHeaderFileOffset > 0
+		&& NtHeaderFileOffset < 0x10000000u
+		&& ImageNtHeader->Signature == IMAGE_NT_SIGNATURE)
 	{
-		ImageFileHeader = &ImageNtHeader->FileHeader;	
+		ImageFileHeader = &ImageNtHeader->FileHeader;
 		ImageOptionalHeader = &ImageNtHeader->OptionalHeader;
 	}
 	else
 	{
-		ImageFileHeader = (IMAGE_FILE_HEADER *)Base;
-		ImageOptionalHeader = (IMAGE_OPTIONAL_HEADER *)( (BYTE*)Base + 0x14 );
+		ImageFileHeader = reinterpret_cast<IMAGE_FILE_HEADER*>(Base);
+		ImageOptionalHeader = reinterpret_cast<IMAGE_OPTIONAL_HEADER*>(reinterpret_cast<BYTE*>(Base) + 0x14);
 	}
-	switch ( ImageOptionalHeader->Magic )
+
+	switch (ImageOptionalHeader->Magic)
 	{
 	case IMAGE_NT_OPTIONAL_HDR32_MAGIC:
 		return ImageDirectoryEntryToData32(
@@ -448,7 +455,7 @@ PVOID WINAPI ImageDirectoryEntryToDataEx(PVOID Base, BOOLEAN MappedAsImage, USHO
 			DirectoryEntry,
 			Size,
 			ImageFileHeader,
-			(IMAGE_OPTIONAL_HEADER32 *)ImageOptionalHeader);
+			reinterpret_cast<IMAGE_OPTIONAL_HEADER32*>(ImageOptionalHeader));
 	case IMAGE_NT_OPTIONAL_HDR64_MAGIC:
 		return ImageDirectoryEntryToData64(
 			Base,
@@ -456,7 +463,7 @@ PVOID WINAPI ImageDirectoryEntryToDataEx(PVOID Base, BOOLEAN MappedAsImage, USHO
 			DirectoryEntry,
 			Size,
 			ImageFileHeader,
-			(IMAGE_OPTIONAL_HEADER64 *)ImageOptionalHeader);
+			reinterpret_cast<IMAGE_OPTIONAL_HEADER64*>(ImageOptionalHeader));
 	case IMAGE_ROM_OPTIONAL_HDR_MAGIC:
 		return ImageDirectoryEntryToDataRom(
 			Base,
@@ -464,7 +471,7 @@ PVOID WINAPI ImageDirectoryEntryToDataEx(PVOID Base, BOOLEAN MappedAsImage, USHO
 			DirectoryEntry,
 			Size,
 			ImageFileHeader,
-			(IMAGE_ROM_OPTIONAL_HEADER *)ImageOptionalHeader);
+			reinterpret_cast<IMAGE_ROM_OPTIONAL_HEADER*>(ImageOptionalHeader));
 	}
 	return nullptr;
 }
@@ -489,13 +496,13 @@ IMAGE_SECTION_HEADER* WINAPI ImageRvaToSection(PIMAGE_NT_HEADERS NtHeaders, PVOI
 	if (!dwNumberOfSections)
 		return nullptr;
 
-	WORD SizeOfOptionalHeader = NtHeaders->FileHeader.SizeOfOptionalHeader;
-	IMAGE_SECTION_HEADER* pSectionHeaders = (IMAGE_SECTION_HEADER*)( (BYTE*)&NtHeaders->OptionalHeader + SizeOfOptionalHeader );
+	auto SizeOfOptionalHeader = NtHeaders->FileHeader.SizeOfOptionalHeader;
+	auto pSectionHeaders = reinterpret_cast<IMAGE_SECTION_HEADER*>(reinterpret_cast<BYTE*>(&NtHeaders->OptionalHeader) + SizeOfOptionalHeader);
 	for (DWORD i = 0; i < dwNumberOfSections; i++)
 	{
-		DWORD VirtualAddress = pSectionHeaders[i].VirtualAddress;
-		DWORD SizeOfRawData = pSectionHeaders[i].SizeOfRawData;
-		if ( (Rva >= VirtualAddress) && (Rva < (SizeOfRawData + VirtualAddress)) )
+		auto VirtualAddress = pSectionHeaders[i].VirtualAddress;
+		auto SizeOfRawData = pSectionHeaders[i].SizeOfRawData;
+		if ((Rva >= VirtualAddress) && (Rva < (SizeOfRawData + VirtualAddress)))
 			return &pSectionHeaders[i];
 	}
 	return nullptr;
@@ -512,11 +519,11 @@ PVOID WINAPI ImageRvaToVa(PIMAGE_NT_HEADERS NtHeaders, void* Base, DWORD Rva)
 {
 	IMAGE_SECTION_HEADER* ResultSection = nullptr;
 
-	ResultSection = ImageRvaToSection(NtHeaders, (PVOID)Base, Rva);
-	if ( !ResultSection )
+	ResultSection = ImageRvaToSection(NtHeaders, reinterpret_cast<PVOID>(Base), Rva);
+	if (!ResultSection)
 		return nullptr;
 
-	return (char *)Base + (Rva - ResultSection->VirtualAddress) + ResultSection->PointerToRawData;
+	return reinterpret_cast<char*>(Base) + (Rva - ResultSection->VirtualAddress) + ResultSection->PointerToRawData;
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -538,15 +545,16 @@ IMAGE_SECTION_HEADER* WINAPI ImageVaToSection(PIMAGE_NT_HEADERS NtHeaders, PVOID
 	if (!dwNumberOfSections)
 		return nullptr;
 
-	UINT_PTR ImageOffset = (BYTE*)Va - (BYTE*)Base;
+	UINT_PTR ImageOffset = reinterpret_cast<BYTE*>(Va) - reinterpret_cast<BYTE*>(Base);
 
-	WORD SizeOfOptionalHeader = NtHeaders->FileHeader.SizeOfOptionalHeader;
-	IMAGE_SECTION_HEADER* pSectionHeaders = (IMAGE_SECTION_HEADER*)( (BYTE*)&NtHeaders->OptionalHeader + SizeOfOptionalHeader );
+	auto SizeOfOptionalHeader = NtHeaders->FileHeader.SizeOfOptionalHeader;
+	auto pSectionHeaders = reinterpret_cast<IMAGE_SECTION_HEADER*>(reinterpret_cast<BYTE*>(&NtHeaders->OptionalHeader) + SizeOfOptionalHeader);
 	for (DWORD i = 0; i < dwNumberOfSections; i++)
 	{
-		DWORD PointerToRawData = pSectionHeaders[i].PointerToRawData;
-		DWORD SizeOfRawData = pSectionHeaders[i].SizeOfRawData;
-		if ( ( ImageOffset >= PointerToRawData ) && (ImageOffset < ( PointerToRawData + SizeOfRawData )) )
+		auto PointerToRawData = pSectionHeaders[i].PointerToRawData;
+		auto SizeOfRawData = pSectionHeaders[i].SizeOfRawData;
+		#pragma warning(suppress:26451)
+		if ((ImageOffset >= PointerToRawData) && (ImageOffset < (PointerToRawData + SizeOfRawData)))
 			return &pSectionHeaders[i];
 	}
 	return nullptr;
@@ -563,11 +571,12 @@ DWORD WINAPI ImageVaToRva(PIMAGE_NT_HEADERS NtHeaders, void* Base, void* Va)
 {
 	IMAGE_SECTION_HEADER* ResultSection = nullptr;
 
-	ResultSection = ImageVaToSection(NtHeaders, (PVOID)Base, Va);
-	if ( !ResultSection )
+	ResultSection = ImageVaToSection(NtHeaders, reinterpret_cast<PVOID>(Base), Va);
+	if (!ResultSection)
 		return NULL;
 
-	DWORD ImageOffset = (BYTE*)Va - (BYTE*)Base;
+	#pragma warning(suppress:4244)
+	DWORD ImageOffset = reinterpret_cast<BYTE*>(Va) - reinterpret_cast<BYTE*>(Base);
 
 	return (ImageOffset - ResultSection->PointerToRawData) + ResultSection->VirtualAddress;
 }
@@ -580,10 +589,10 @@ DWORD WINAPI ImageVaToRva(PIMAGE_NT_HEADERS NtHeaders, void* Base, void* Va)
 /// <returns>If the function succeeds, the return value is the relative virtual address (RVA) in the mapped file</returns>
 DWORD WINAPI ImageVaToRva(void* Base, void* Va)
 {
-	IMAGE_DOS_HEADER* pDosHeader = (IMAGE_DOS_HEADER*)Base;
-	IMAGE_NT_HEADERS* ImageNtHeader = (PIMAGE_NT_HEADERS)( (LPBYTE)pDosHeader + pDosHeader->e_lfanew );
+	auto pDosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(Base);
+	auto ImageNtHeader = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<LPBYTE>(pDosHeader) + pDosHeader->e_lfanew);
 
-	return ImageVaToRva( ImageNtHeader, Base, Va );
+	return ImageVaToRva(ImageNtHeader, Base, Va);
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -594,50 +603,17 @@ DWORD WINAPI ImageVaToRva(void* Base, void* Va)
 /// </summary>
 /// <param name="Base">The base address of an image that is mapped into memory by a call to the MapViewOfFile function</param>
 /// <returns>If the function succeeds, the return value is a pointer to an IMAGE_NT_HEADERS structure</returns>
-IMAGE_NT_HEADERS* WINAPI ImageNtHeader( _In_ PVOID Base )
+IMAGE_NT_HEADERS* WINAPI ImageNtHeader(_In_ PVOID Base)
 {
-	IMAGE_DOS_HEADER *DosHeader = (IMAGE_DOS_HEADER*)Base;
-	if ( DosHeader
+	auto DosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(Base);
+	if (DosHeader
 		&& DosHeader->e_magic == IMAGE_DOS_SIGNATURE
 		&& DosHeader->e_lfanew >= 0u
-		&& DosHeader->e_lfanew < 0x10000000u )
+		&& DosHeader->e_lfanew < 0x10000000u)
 	{
-		IMAGE_NT_HEADERS* ImageNtHeader = (IMAGE_NT_HEADERS *)((BYTE *)DosHeader + DosHeader->e_lfanew);
-		if ( ImageNtHeader->Signature == IMAGE_NT_SIGNATURE )
+		auto ImageNtHeader = reinterpret_cast<IMAGE_NT_HEADERS*>(reinterpret_cast<BYTE*>(DosHeader) + DosHeader->e_lfanew);
+		if (ImageNtHeader->Signature == IMAGE_NT_SIGNATURE)
 			return ImageNtHeader;
 	}
 	return nullptr;
-}
-
-//////////////////////////////////////////////////////////////////////////////////////////////////
-//							Utility functions for GetModuleW
-//////////////////////////////////////////////////////////////////////////////////////////////////
-wchar_t* GetFileNameFromPath( wchar_t* Path )
-{
-	wchar_t* LastSlash = NULL;
-	for (DWORD i = 0; Path[i] != NULL; i++)
-	{
-		if ( Path[i] == '\\' )
-			LastSlash = &Path[i + 1];
-	}
-	return LastSlash;
-}
-wchar_t* RemoveFileExtension( wchar_t* FullFileName, wchar_t* OutputBuffer, DWORD OutputBufferSize )
-{
-	wchar_t* LastDot = NULL;
-	for (DWORD i = 0; FullFileName[i] != NULL; i++)
-		if ( FullFileName[i] == '.' )
-			LastDot = &FullFileName[i];
-	
-	for (DWORD j = 0; j < OutputBufferSize; j++)
-	{
-		OutputBuffer[j] = FullFileName[j];
-		if ( &FullFileName[j] == LastDot )
-		{
-			OutputBuffer[j] = NULL;
-			break;
-		}
-	}
-	OutputBuffer[OutputBufferSize-1] = NULL;
-	return OutputBuffer;
 }

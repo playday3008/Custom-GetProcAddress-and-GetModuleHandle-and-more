@@ -107,9 +107,3 @@ DWORD WINAPI ImageVaToRva(PIMAGE_NT_HEADERS NtHeaders, void* Base, void* Va);
 /// <param name="VA">ointer to data inside the Images buffer</param>
 /// <returns>If the function succeeds, the return value is the relative virtual address (RVA) in the mapped file</returns>
 DWORD WINAPI ImageVaToRva(void* Base, void* Va);
-
-//////////////////////////////////////////////////////////////////////////////////////////////////
-//							Utility functions for GetModuleW
-//////////////////////////////////////////////////////////////////////////////////////////////////
-wchar_t* GetFileNameFromPath( wchar_t* Path );
-wchar_t* RemoveFileExtension( wchar_t* FullFileName, wchar_t* OutputBuffer, DWORD OutputBufferSize );
